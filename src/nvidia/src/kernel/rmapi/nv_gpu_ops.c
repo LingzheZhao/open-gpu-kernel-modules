@@ -4470,11 +4470,13 @@ nvGpuOpsBuildExternalAllocPtes
     // there, redirecting the mapping (compTagLineMin = 1 -> +1TB). Comptags in
     // the mapping GPU's PTE are also meaningless for a remote target: the
     // peer's BAR1 PTE decides how the access is (de)compressed. So map the
-    // peer with the uncompressed kind, but only when the peer's static BAR1
-    // PTEs carry the compressed kind: kbusIncreaseStaticBar1Refcount()
-    // switches them to the allocation's kind only for >= 2MB pages; otherwise
-    // they keep the uncompressed default kind and a peer would access raw
-    // compressed data, so reject the mapping.
+    // peer with the uncompressed kind, but only when the peer's BAR1 PTEs
+    // carry the compressed kind:
+    // - dynamic window: kbusMapFbAperture() mapped this memdesc with its kind.
+    // - static BAR1: kbusIncreaseStaticBar1Refcount() switches the static
+    //   PTEs to the allocation's kind only for >= 2MB pages; otherwise they
+    //   keep the uncompressed default kind and a peer would access raw
+    //   compressed data, so reject the mapping.
     // The static BAR1 check uses the owner's kind (memdescGetPteKind(), as
     // kbusIncreaseStaticBar1Refcount() records it), not the mapping kind:
     // the caller's compression/format request may have rewritten the mapping
@@ -4488,7 +4490,7 @@ nvGpuOpsBuildExternalAllocPtes
     if ((pFmt->version <= GMMU_FMT_VERSION_2) && isBar1P2PSupported &&
         (isCompressedKind || bOwnerCompressed))
     {
-        if (bOwnerCompressed)
+        if (!bDynBar1Mapped && bOwnerCompressed)
         {
             MEMORY_DESCRIPTOR *pRootMemDesc = memdescGetRootMemDesc(pMemDesc, NULL);
 
