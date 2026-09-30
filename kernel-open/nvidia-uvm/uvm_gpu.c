@@ -2187,6 +2187,16 @@ bool uvm_parent_gpus_are_bar1_peers(const uvm_parent_gpu_t *parent_gpu0, const u
     return false;
 }
 
+// BAR1P2P: managed memory maps peer pages with up to 2MB PTEs at
+// bar1_p2p_dma_base_address + FB offset, and the phys mode CE and peer identity
+// mappings rely on the same base, so a static BAR1 DMA window that is not 2MB
+// aligned cannot be used for managed memory.
+static bool bar1_p2p_dma_base_misaligned(const uvm_parent_gpu_peer_t *parent_peer_caps, size_t peer_index)
+{
+    return parent_peer_caps->bar1_p2p_dma_size[peer_index] != 0 &&
+           !IS_ALIGNED(parent_peer_caps->bar1_p2p_dma_base_address[peer_index], UVM_PAGE_SIZE_2M);
+}
+
 // BAR1P2P: whether managed memory must not use direct peer access (remote
 // mappings, CE peer copies, peer identity mappings) between PCIE_BAR1 peers.
 //
@@ -2201,6 +2211,10 @@ bool uvm_parent_gpus_are_bar1_peers(const uvm_parent_gpu_t *parent_gpu0, const u
 // memory when uvm_bar1_p2p_managed is set. RM reports no PCIe atomics for them,
 // so peer accesses use the SYS_NON_COHERENT aperture, which NVIDIA only enables
 // on Hopper+.
+//
+// BAR1P2P: static BAR1 peers whose DMA window is not 2MB aligned in at least
+// one direction are never used for managed memory, on any architecture and
+// regardless of uvm_bar1_p2p_managed, see bar1_p2p_dma_base_misaligned().
 bool uvm_parent_gpus_bar1_managed_unsupported(const uvm_parent_gpu_t *parent_gpu0,
                                               const uvm_parent_gpu_t *parent_gpu1)
 {
@@ -2214,6 +2228,9 @@ bool uvm_parent_gpus_bar1_managed_unsupported(const uvm_parent_gpu_t *parent_gpu
         return false;
 
     if (parent_peer_caps->bar1_p2p_dma_size[0] == 0 || parent_peer_caps->bar1_p2p_dma_size[1] == 0)
+        return true;
+
+    if (bar1_p2p_dma_base_misaligned(parent_peer_caps, 0) || bar1_p2p_dma_base_misaligned(parent_peer_caps, 1))
         return true;
 
     if (!parent_gpu0->bar1_p2p_managed_supported || !parent_gpu1->bar1_p2p_managed_supported)
@@ -2538,6 +2555,21 @@ static NV_STATUS parent_peers_init(uvm_parent_gpu_t *parent_gpu0,
 
     if (parent_peer_caps->bar1_p2p_dma_size[0] || parent_peer_caps->bar1_p2p_dma_size[1])
         UVM_ASSERT(link_type == UVM_GPU_LINK_PCIE_BAR1);
+
+    // BAR1P2P: report a static BAR1 DMA window that cannot be used for managed
+    // memory once, when the pair is initialized. The pair is kept off managed
+    // memory peer access by uvm_parent_gpus_bar1_managed_unsupported().
+    if (link_type == UVM_GPU_LINK_PCIE_BAR1 &&
+        (bar1_p2p_dma_base_misaligned(parent_peer_caps, 0) || bar1_p2p_dma_base_misaligned(parent_peer_caps, 1))) {
+        UVM_INFO_PRINT("BAR1 P2P DMA window between GPUs %s and %s is not 2MB aligned "
+                       "(0x%llx size 0x%llx, 0x%llx size 0x%llx); managed memory will not use direct peer access\n",
+                       uvm_parent_gpu_name(parent_gpu0),
+                       uvm_parent_gpu_name(parent_gpu1),
+                       parent_peer_caps->bar1_p2p_dma_base_address[0],
+                       parent_peer_caps->bar1_p2p_dma_size[0],
+                       parent_peer_caps->bar1_p2p_dma_base_address[1],
+                       parent_peer_caps->bar1_p2p_dma_size[1]);
+    }
 
     return NV_OK;
 

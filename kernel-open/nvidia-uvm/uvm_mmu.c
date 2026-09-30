@@ -2413,7 +2413,9 @@ NV_STATUS uvm_mmu_create_peer_identity_mappings(uvm_gpu_t *gpu, uvm_gpu_t *peer)
     // BAR1P2P: for BAR1 peers without a static BAR1 DMA window a peer
     // identity mapping would map SYS base 0 (host RAM).
     // BAR1P2P: pre-Hopper BAR1 peers are not used for managed memory unless
-    // uvm_bar1_p2p_managed is set. UVM never copies between such peers
+    // uvm_bar1_p2p_managed is set, and neither are static BAR1 peers whose DMA
+    // window is not 2MB aligned (any architecture, regardless of
+    // uvm_bar1_p2p_managed). UVM never copies between such peers
     // (can_copy_from is not set in enable_peers()), so skip the mapping.
     // destroy_identity_mapping() handles the unmapped state.
     if (uvm_parent_gpus_bar1_managed_unsupported(gpu->parent, peer->parent))
@@ -2425,6 +2427,22 @@ NV_STATUS uvm_mmu_create_peer_identity_mappings(uvm_gpu_t *gpu, uvm_gpu_t *peer)
     aperture = phys_address.aperture;
     phys_offset = phys_address.address;
     page_size = mmu_biggest_page_size(&gpu->address_space_tree, aperture);
+
+    // BAR1P2P: for BAR1 peers phys_offset is the peer's BAR1 DMA window base,
+    // which need not be aligned to the biggest page size (e.g. 512MB). Use the
+    // biggest page size that phys_offset is aligned to, so that each PTE
+    // points at the intended peer address.
+    while (!IS_ALIGNED(phys_offset, page_size)) {
+        page_size = uvm_mmu_biggest_page_size_up_to(&gpu->address_space_tree, page_size / 2);
+        if (page_size == 0) {
+            UVM_ERR_PRINT("Peer identity mapping offset 0x%llx is not page aligned, GPU %s peer %s\n",
+                          phys_offset,
+                          uvm_gpu_name(gpu),
+                          uvm_gpu_name(peer));
+            return NV_ERR_INVALID_ADDRESS;
+        }
+    }
+
     size = UVM_ALIGN_UP(peer->mem_info.max_allocatable_address + 1, page_size);
     peer_mapping = uvm_gpu_get_peer_mapping(gpu, peer->id);
 

@@ -1252,6 +1252,8 @@ static NV_STATUS enable_peers(uvm_va_space_t *va_space, uvm_gpu_t *gpu0, uvm_gpu
     // BAR1P2P: pre-Hopper BAR1 peers are not used for managed memory unless
     // uvm_bar1_p2p_managed is set (see
     // uvm_parent_gpus_bar1_managed_unsupported()).
+    // BAR1P2P: neither are static BAR1 peers whose DMA window is not 2MB
+    // aligned (any architecture, regardless of uvm_bar1_p2p_managed).
     // For such pairs leave can_access, accessible_from and can_copy_from clear
     // so managed pages stage through sysmem, as for PCIe peers without peer
     // access. The enabled_peers bit is still set below: external mappings
