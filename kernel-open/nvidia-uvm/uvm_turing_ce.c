@@ -22,6 +22,8 @@
 *******************************************************************************/
 
 #include "uvm_hal.h"
+// BAR1P2P: UVM_ASSERT_MSG_RELEASE() calls uvm_global_set_fatal_error().
+#include "uvm_global.h"
 #include "uvm_push.h"
 #include "clc46f.h"
 #include "clc5b5.h"
@@ -175,13 +177,26 @@ static NvU32 ce_aperture(uvm_aperture_t aperture)
                  HWCONST(C5B5, SET_DST_PHYS_MODE, TARGET, LOCAL_FB));
     BUILD_BUG_ON(HWCONST(C5B5, SET_SRC_PHYS_MODE, TARGET, COHERENT_SYSMEM) !=
                  HWCONST(C5B5, SET_DST_PHYS_MODE, TARGET, COHERENT_SYSMEM));
-
-    UVM_ASSERT_MSG(aperture == UVM_APERTURE_VID || aperture == UVM_APERTURE_SYS, "aperture 0x%x\n", aperture);
+    BUILD_BUG_ON(HWCONST(C5B5, SET_SRC_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM) !=
+                 HWCONST(C5B5, SET_DST_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM));
 
     if (aperture == UVM_APERTURE_SYS)
         return HWCONST(C5B5, SET_SRC_PHYS_MODE, TARGET, COHERENT_SYSMEM);
-    else
+
+    // BAR1P2P: SYS_NON_COHERENT is used for BAR1 P2P peers without PCIe
+    // atomics. Turing phys mode copies and Turing/Ampere/Ada memsets use this
+    // function; UVM does not memset peer memory, but encode the aperture
+    // correctly instead of targeting the local FB.
+    if (aperture == UVM_APERTURE_SYS_NON_COHERENT)
+        return HWCONST(C5B5, SET_SRC_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM);
+
+    if (aperture == UVM_APERTURE_VID)
         return HWCONST(C5B5, SET_SRC_PHYS_MODE, TARGET, LOCAL_FB);
+
+    // BAR1P2P: report invalid apertures in release builds too, instead of
+    // silently targeting the local FB.
+    UVM_ASSERT_MSG_RELEASE(0, "Invalid aperture: %s (%d)\n", uvm_aperture_string(aperture), aperture);
+    return HWCONST(C5B5, SET_SRC_PHYS_MODE, TARGET, LOCAL_FB);
 }
 
 // Push SET_{SRC,DST}_PHYS mode if needed and return LAUNCH_DMA_{SRC,DST}_TYPE
