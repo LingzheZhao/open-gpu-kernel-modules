@@ -238,6 +238,7 @@ typedef struct
 } subDeviceDesc;
 
 static void _nvGpuOpsDynBar1DestroyAll(subDeviceDesc *rmSubDevice);
+static NV_STATUS nvGpuOpsMemGetPageSize(OBJGPU *pGpu, MEMORY_DESCRIPTOR *pMemDesc, NvU64 *pPageSize);
 
 struct gpuSession
 {
@@ -3822,8 +3823,13 @@ _nvGpuOpsDynBar1Create(subDeviceDesc *rmSubDevice,
     NvBool              bRemoteLockTaken = (rmDeviceGpuLockIsOwner(gpuGetInstance(pRemoteGpu)) ||
                                             rmGpuLockIsOwner());
     NvBool              bMapped = NV_FALSE;
+    NvU64               pageSize;
 
     portMemSet(&memArea, 0, sizeof(memArea));
+
+    // BAR1P2P: the page size the PTEs of this allocation will be built with.
+    NV_CHECK_OK_OR_RETURN(LEVEL_ERROR,
+        nvGpuOpsMemGetPageSize(pMappingGpu, pAllocMemDesc, &pageSize));
 
     // This source-subdevice budget is only an early rejection heuristic.
     // The BAR1 allocator accounts for all peers, NIC mappings and fragmentation.
@@ -3899,6 +3905,23 @@ _nvGpuOpsDynBar1Create(subDeviceDesc *rmSubDevice,
         fail);
 
     memdescGetPtePhysAddrsForGpu(pWin, pMappingGpu, AT_GPU, 0, 0, 1, &dmaBase);
+
+    //
+    // BAR1P2P: peer PTEs are encoded as dmaBase + offset with up to pageSize
+    // pages; a PTE drops the address bits below its page size, so a window
+    // that is not aligned to it would be accessed at the wrong address.
+    //
+    if (!NV_IS_ALIGNED64(dmaBase, pageSize))
+    {
+        NV_PRINTF(LEVEL_ERROR,
+                  "METHOD3: dynamic BAR1 P2P GPU%u->GPU%u hMem 0x%x: window dmaBase "
+                  "0x%llx not aligned to page size 0x%llx\n",
+                  gpuGetInstance(pMappingGpu), gpuGetInstance(pRemoteGpu), hDupMemory,
+                  dmaBase, pageSize);
+        status = NV_ERR_INVALID_ADDRESS;
+        memdescUnmapIommu(pWin, pMappingGpu->busInfo.iovaspaceId);
+        goto fail;
+    }
 
     pMap = portMemAllocNonPaged(sizeof(*pMap));
     if (pMap == NULL)
