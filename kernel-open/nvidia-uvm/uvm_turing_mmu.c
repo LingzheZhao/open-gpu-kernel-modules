@@ -250,14 +250,20 @@ static NvU64 make_pte_turing(uvm_aperture_t aperture, NvU64 address, uvm_prot_t 
     pte_bits |= HWCONST64(_MMU_VER2, PTE, VALID, TRUE);
 
     // aperture 2:1
+    // BAR1P2P: SYS_NON_COHERENT is used for BAR1 P2P peers without PCIe
+    // atomics (always the case before Blackwell). It used to hit the assert
+    // below (debug builds only) and be encoded as VIDEO_MEMORY with a VID
+    // address, i.e. a remote mapping into the accessing GPU's own FB.
     if (aperture == UVM_APERTURE_SYS)
         aperture_bits = NV_MMU_VER2_PTE_APERTURE_SYSTEM_COHERENT_MEMORY;
+    else if (aperture == UVM_APERTURE_SYS_NON_COHERENT)
+        aperture_bits = NV_MMU_VER2_PTE_APERTURE_SYSTEM_NON_COHERENT_MEMORY;
     else if (aperture == UVM_APERTURE_VID)
         aperture_bits = NV_MMU_VER2_PTE_APERTURE_VIDEO_MEMORY;
     else if (aperture >= UVM_APERTURE_PEER_0 && aperture <= UVM_APERTURE_PEER_7)
         aperture_bits = NV_MMU_VER2_PTE_APERTURE_PEER_MEMORY;
     else
-        UVM_ASSERT_MSG(0, "Invalid aperture: %d\n", aperture);
+        UVM_ASSERT_MSG_RELEASE(0, "Invalid aperture: %s (%d)\n", uvm_aperture_string(aperture), aperture);
 
     pte_bits |= HWVALUE64(_MMU_VER2, PTE, APERTURE, aperture_bits);
 
@@ -286,8 +292,8 @@ static NvU64 make_pte_turing(uvm_aperture_t aperture, NvU64 address, uvm_prot_t 
         pte_bits |= HWCONST64(_MMU_VER2, PTE, ATOMIC_DISABLE, TRUE);
 
     address >>= NV_MMU_VER2_PTE_ADDRESS_SHIFT;
-    if (aperture == UVM_APERTURE_SYS) {
-        // sys address 53:8
+    if (uvm_aperture_is_sys(aperture)) {
+        // sys address 53:8 (coherent and non-coherent)
         pte_bits |= HWVALUE64(_MMU_VER2, PTE, ADDRESS_SYS, address);
     }
     else {

@@ -22,6 +22,8 @@
 *******************************************************************************/
 
 #include "uvm_hal.h"
+// BAR1P2P: UVM_ASSERT_MSG_RELEASE() calls uvm_global_set_fatal_error().
+#include "uvm_global.h"
 #include "uvm_hal_types.h"
 #include "clc6b5.h"
 #include "clc7b5.h"
@@ -63,21 +65,40 @@ static NvU32 ce_aperture(uvm_aperture_t aperture)
                  HWCONST(C6B5, SET_DST_PHYS_MODE, TARGET, LOCAL_FB));
     BUILD_BUG_ON(HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, COHERENT_SYSMEM) !=
                  HWCONST(C6B5, SET_DST_PHYS_MODE, TARGET, COHERENT_SYSMEM));
+    BUILD_BUG_ON(HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM) !=
+                 HWCONST(C6B5, SET_DST_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM));
     BUILD_BUG_ON(HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, PEERMEM) !=
                  HWCONST(C6B5, SET_DST_PHYS_MODE, TARGET, PEERMEM));
+
+    // BAR1P2P: this function is also used for the C7B5 class (GA10x, AD10x).
+    BUILD_BUG_ON(HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM) !=
+                 HWCONST(C7B5, SET_SRC_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM));
 
     if (aperture == UVM_APERTURE_SYS) {
         return HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, COHERENT_SYSMEM);
     }
+    else if (aperture == UVM_APERTURE_SYS_NON_COHERENT) {
+        // BAR1P2P: SYS_NON_COHERENT is used for BAR1 P2P peers when PCIe
+        // atomics are not enabled between them, which is always the case
+        // before Blackwell. Encode it as NONCOHERENT_SYSMEM like Hopper's
+        // ce_aperture(); it used to fall through to the peer branch below,
+        // which produced TARGET=PEERMEM with an invalid PEER_ID and an
+        // unsupported aperture fault (Xid 31).
+        return HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, NONCOHERENT_SYSMEM);
+    }
     else if (aperture == UVM_APERTURE_VID) {
         return HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, LOCAL_FB);
     }
-    else {
-        UVM_ASSERT(uvm_aperture_is_peer(aperture));
+    else if (uvm_aperture_is_peer(aperture)) {
         return HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, PEERMEM) |
                HWVALUE(C6B5, SET_SRC_PHYS_MODE, FLA, 0) |
                HWVALUE(C6B5, SET_SRC_PHYS_MODE, PEER_ID, UVM_APERTURE_PEER_ID(aperture));
     }
+
+    // BAR1P2P: report invalid apertures in release builds too, instead of
+    // silently encoding them as a peer.
+    UVM_ASSERT_MSG_RELEASE(0, "Invalid aperture: %s (%d)\n", uvm_aperture_string(aperture), aperture);
+    return HWCONST(C6B5, SET_SRC_PHYS_MODE, TARGET, LOCAL_FB);
 }
 
 // Push SET_{SRC,DST}_PHYS mode if needed and return LAUNCH_DMA_{SRC,DST}_TYPE
