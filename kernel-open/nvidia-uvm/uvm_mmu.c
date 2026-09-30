@@ -2411,10 +2411,12 @@ NV_STATUS uvm_mmu_create_peer_identity_mappings(uvm_gpu_t *gpu, uvm_gpu_t *peer)
         return NV_OK;
 
     // METHOD3: dynamic BAR1 peers have no static BAR1 DMA window, so a peer
-    // identity mapping would map SYS base 0 (host RAM). UVM never copies
-    // between such peers (can_copy_from is not set in enable_peers()), so skip
-    // the mapping. destroy_identity_mapping() handles the unmapped state.
-    if (uvm_parent_gpus_are_dynamic_bar1_peers(gpu->parent, peer->parent))
+    // identity mapping would map SYS base 0 (host RAM).
+    // BAR1P2P: pre-Hopper BAR1 peers are not used for managed memory unless
+    // uvm_bar1_p2p_managed is set. UVM never copies between such peers
+    // (can_copy_from is not set in enable_peers()), so skip the mapping.
+    // destroy_identity_mapping() handles the unmapped state.
+    if (uvm_parent_gpus_bar1_managed_unsupported(gpu->parent, peer->parent))
         return NV_OK;
 
     // Use transformation of address 0 to get offset and aperture for all

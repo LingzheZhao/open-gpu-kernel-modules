@@ -59,6 +59,21 @@ MODULE_PARM_DESC(uvm_peer_copy, "Choose the addressing mode for peer copying, op
                                 UVM_PARAM_PEER_COPY_PHYSICAL " [default] or " UVM_PARAM_PEER_COPY_VIRTUAL ". "
                                 "Valid for Ampere+ GPUs.");
 
+// BAR1P2P: out-of-tree patches enable PCIe BAR1 P2P (UVM_GPU_LINK_PCIE_BAR1) on
+// pre-Hopper GPUs. UVM auto-enables BAR1 peers in every VA space, which would
+// make managed memory use direct peer access (remote mappings and CE peer
+// copies through the peer's BAR1) on these GPUs. NVIDIA only validates this on
+// Hopper+. The parameter is read-only because the gate is evaluated both when
+// the peer identity mappings are created and when peers are enabled in each VA
+// space; changing it at runtime would make the two inconsistent.
+static int uvm_bar1_p2p_managed = 0;
+module_param(uvm_bar1_p2p_managed, int, S_IRUGO);
+MODULE_PARM_DESC(uvm_bar1_p2p_managed, "Managed memory peer access over PCIe BAR1 P2P on pre-Hopper GPUs: "
+                                       "0 [default] = disabled, managed pages migrate through sysmem and "
+                                       "external mappings (CUDA IPC, cuMem, peer access) are unaffected; "
+                                       "1 = enabled (experimental). Hopper+ GPUs are not affected. "
+                                       "Dynamic BAR1 P2P peers never support it.");
+
 static uvm_user_channel_t *get_user_channel(uvm_rb_tree_node_t *node)
 {
     return container_of(node, uvm_user_channel_t, instance_ptr.node);
@@ -2173,14 +2188,23 @@ bool uvm_parent_gpus_are_bar1_peers(const uvm_parent_gpu_t *parent_gpu0, const u
     return false;
 }
 
+// BAR1P2P: whether managed memory must not use direct peer access (remote
+// mappings, CE peer copies, peer identity mappings) between PCIE_BAR1 peers.
+//
 // METHOD3: a BAR1 peer pair is "dynamic" when RM reports the PCIE_BAR1 link
 // but no whole-FB static BAR1 DMA window for at least one direction
 // (bar1_p2p_dma_size == 0). Such pairs are served by per-allocation dynamic
 // BAR1 windows that RM builds for external mappings only. UVM managed memory
-// has no window to address the peer FB through, so it must not use direct
-// peer access (remote mappings or CE peer copies) for them.
-bool uvm_parent_gpus_are_dynamic_bar1_peers(const uvm_parent_gpu_t *parent_gpu0,
-                                            const uvm_parent_gpu_t *parent_gpu1)
+// has no window to address the peer FB through, so it never uses direct peer
+// access for them, regardless of uvm_bar1_p2p_managed.
+//
+// BAR1P2P: static BAR1 peers involving a GPU without
+// bar1_p2p_managed_supported (Turing, Ampere, Ada) are only used for managed
+// memory when uvm_bar1_p2p_managed is set. RM reports no PCIe atomics for them,
+// so peer accesses use the SYS_NON_COHERENT aperture, which NVIDIA only enables
+// on Hopper+.
+bool uvm_parent_gpus_bar1_managed_unsupported(const uvm_parent_gpu_t *parent_gpu0,
+                                              const uvm_parent_gpu_t *parent_gpu1)
 {
     const uvm_parent_gpu_peer_t *parent_peer_caps;
 
@@ -2191,7 +2215,13 @@ bool uvm_parent_gpus_are_dynamic_bar1_peers(const uvm_parent_gpu_t *parent_gpu0,
     if (parent_peer_caps->ref_count == 0 || parent_peer_caps->link_type != UVM_GPU_LINK_PCIE_BAR1)
         return false;
 
-    return parent_peer_caps->bar1_p2p_dma_size[0] == 0 || parent_peer_caps->bar1_p2p_dma_size[1] == 0;
+    if (parent_peer_caps->bar1_p2p_dma_size[0] == 0 || parent_peer_caps->bar1_p2p_dma_size[1] == 0)
+        return true;
+
+    if (!parent_gpu0->bar1_p2p_managed_supported || !parent_gpu1->bar1_p2p_managed_supported)
+        return uvm_bar1_p2p_managed == 0;
+
+    return false;
 }
 
 bool uvm_parent_gpus_are_nvlink_direct_connected(const uvm_parent_gpu_t *parent_gpu0,
@@ -3268,11 +3298,18 @@ uvm_gpu_phys_address_t uvm_gpu_peer_phys_address(uvm_gpu_t *owning_gpu, NvU64 ad
         UVM_ASSERT(parent_peer_caps->link_type == UVM_GPU_LINK_PCIE_BAR1);
         // METHOD3: dynamic BAR1 peers have no static DMA window (size 0, base
         // 0), so the address computed below would point the GPU at host RAM.
+        // BAR1P2P: pre-Hopper BAR1 peers are gated off by default as well.
         // enable_peers() and uvm_mmu_create_peer_identity_mappings() keep such
-        // pairs off this path; keep this check in release builds so any path
-        // that misses those gates is reported loudly.
-        UVM_ASSERT_MSG_RELEASE(parent_peer_caps->bar1_p2p_dma_size[peer_index] != 0,
-                               "no static BAR1 P2P DMA window, GPU %s accessing GPU %s\n",
+        // pairs off this path; keep this check in release builds so that a
+        // remote mapping or a physical-mode peer copy that misses those gates
+        // is reported. Virtual-mode peer copies (always on Turing, on Ampere
+        // and Ada with uvm_peer_copy=virt) do not come here:
+        // uvm_gpu_peer_copy_address() uses the peer identity mapping, which is
+        // not created for such pairs, so they rely on can_copy_from.
+        UVM_ASSERT_MSG_RELEASE(!uvm_parent_gpus_bar1_managed_unsupported(accessing_gpu->parent, owning_gpu->parent),
+                               "BAR1 P2P peer not usable for managed memory (DMA window size 0x%llx), "
+                               "GPU %s accessing GPU %s\n",
+                               parent_peer_caps->bar1_p2p_dma_size[peer_index],
                                uvm_gpu_name(accessing_gpu),
                                uvm_gpu_name(owning_gpu));
 
@@ -3305,6 +3342,10 @@ uvm_gpu_address_t uvm_gpu_peer_copy_address(uvm_gpu_t *owning_gpu, NvU64 address
     // MIG peers do not create peer GPU mappings so it should never reach here.
     UVM_ASSERT(!uvm_gpus_are_smc_peers(owning_gpu, accessing_gpu));
     UVM_ASSERT(accessing_gpu->parent->peer_copy_mode == UVM_GPU_PEER_COPY_MODE_VIRTUAL);
+
+    // BAR1P2P: no peer identity mapping exists for BAR1 pairs that are not
+    // used for managed memory, see uvm_mmu_create_peer_identity_mappings().
+    UVM_ASSERT(!uvm_parent_gpus_bar1_managed_unsupported(accessing_gpu->parent, owning_gpu->parent));
     gpu_peer_mapping = uvm_gpu_get_peer_mapping(accessing_gpu, owning_gpu->id);
 
     return uvm_gpu_address_virtual(gpu_peer_mapping->base + address);
