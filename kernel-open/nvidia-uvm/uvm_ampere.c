@@ -59,6 +59,10 @@ void uvm_hal_ampere_arch_init_properties(uvm_parent_gpu_t *parent_gpu)
 
     parent_gpu->peer_copy_mode = g_uvm_global.peer_copy_mode;
 
+    // BAR1P2P: managed-memory peer access over PCIe BAR1 P2P is not enabled
+    // by default, see uvm_parent_gpus_bar1_managed_unsupported().
+    parent_gpu->bar1_p2p_managed_supported = false;
+
     // Not all units on Ampere support 49-bit addressing, including those which
     // access channel buffers.
     parent_gpu->max_channel_va = 1ULL << 40;

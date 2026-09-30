@@ -1056,6 +1056,15 @@ struct uvm_parent_gpu_struct
     // peers: none, physical only, physical and virtual, etc.
     uvm_gpu_peer_copy_mode_t peer_copy_mode;
 
+    // BAR1P2P: whether the UVM HALs of this GPU support managed-memory peer
+    // access over PCIe BAR1 P2P (UVM_GPU_LINK_PCIE_BAR1), i.e. remote mappings
+    // and CE copies that target a peer's BAR1 with the SYS or SYS_NON_COHERENT
+    // aperture. True for Hopper+, where NVIDIA enables BAR1 P2P. False for
+    // Turing, Ampere and Ada, where BAR1 P2P is only enabled by out-of-tree
+    // patches and managed-memory peer access over it is gated by the
+    // uvm_bar1_p2p_managed module parameter.
+    bool bar1_p2p_managed_supported;
+
     // Virtualization mode of the GPU.
     UVM_VIRT_MODE virt_mode;
 
@@ -1671,6 +1680,15 @@ uvm_aperture_t uvm_gpu_egm_peer_aperture(uvm_parent_gpu_t *local_gpu, uvm_parent
 bool uvm_parent_gpus_are_nvswitch_connected(const uvm_parent_gpu_t *parent_gpu0, const uvm_parent_gpu_t *parent_gpu1);
 
 bool uvm_parent_gpus_are_bar1_peers(const uvm_parent_gpu_t *parent_gpu0, const uvm_parent_gpu_t *parent_gpu1);
+
+// BAR1P2P: true for PCIE_BAR1 peers that must not be used for managed-memory
+// peer access (remote mappings, CE peer copies, peer identity mappings):
+// pairs without a static BAR1 DMA window in at least one direction, and
+// pairs involving a GPU without bar1_p2p_managed_supported unless the
+// uvm_bar1_p2p_managed module parameter is set. Such pairs support external
+// mappings only.
+bool uvm_parent_gpus_bar1_managed_unsupported(const uvm_parent_gpu_t *parent_gpu0,
+                                              const uvm_parent_gpu_t *parent_gpu1);
 
 bool uvm_parent_gpus_are_nvlink_direct_connected(const uvm_parent_gpu_t *parent_gpu0, const uvm_parent_gpu_t *parent_gpu1);
 

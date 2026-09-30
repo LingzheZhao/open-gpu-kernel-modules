@@ -72,6 +72,9 @@ void uvm_hal_hopper_arch_init_properties(uvm_parent_gpu_t *parent_gpu)
 
     parent_gpu->peer_copy_mode = hopper_peer_copy_mode(parent_gpu);
 
+    // BAR1P2P: see uvm_parent_gpus_bar1_managed_unsupported().
+    parent_gpu->bar1_p2p_managed_supported = true;
+
     // All GR context buffers may be mapped to 57b wide VAs. All "compute" units
     // accessing GR context buffers support the 57-bit VA range.
     parent_gpu->max_channel_va = 1ull << 57;
