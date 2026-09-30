@@ -2173,6 +2173,27 @@ bool uvm_parent_gpus_are_bar1_peers(const uvm_parent_gpu_t *parent_gpu0, const u
     return false;
 }
 
+// METHOD3: a BAR1 peer pair is "dynamic" when RM reports the PCIE_BAR1 link
+// but no whole-FB static BAR1 DMA window for at least one direction
+// (bar1_p2p_dma_size == 0). Such pairs are served by per-allocation dynamic
+// BAR1 windows that RM builds for external mappings only. UVM managed memory
+// has no window to address the peer FB through, so it must not use direct
+// peer access (remote mappings or CE peer copies) for them.
+bool uvm_parent_gpus_are_dynamic_bar1_peers(const uvm_parent_gpu_t *parent_gpu0,
+                                            const uvm_parent_gpu_t *parent_gpu1)
+{
+    const uvm_parent_gpu_peer_t *parent_peer_caps;
+
+    if (parent_gpu0 == parent_gpu1)
+        return false;
+
+    parent_peer_caps = parent_gpu_peer_caps(parent_gpu0, parent_gpu1);
+    if (parent_peer_caps->ref_count == 0 || parent_peer_caps->link_type != UVM_GPU_LINK_PCIE_BAR1)
+        return false;
+
+    return parent_peer_caps->bar1_p2p_dma_size[0] == 0 || parent_peer_caps->bar1_p2p_dma_size[1] == 0;
+}
+
 bool uvm_parent_gpus_are_nvlink_direct_connected(const uvm_parent_gpu_t *parent_gpu0,
                                                  const uvm_parent_gpu_t *parent_gpu1)
 {
@@ -3245,7 +3266,15 @@ uvm_gpu_phys_address_t uvm_gpu_peer_phys_address(uvm_gpu_t *owning_gpu, NvU64 ad
         int peer_index = (uvm_id_cmp(accessing_gpu->id, owning_gpu->id) < 0) ? 0 : 1;
 
         UVM_ASSERT(parent_peer_caps->link_type == UVM_GPU_LINK_PCIE_BAR1);
-        UVM_ASSERT(parent_peer_caps->bar1_p2p_dma_size[peer_index] != 0);
+        // METHOD3: dynamic BAR1 peers have no static DMA window (size 0, base
+        // 0), so the address computed below would point the GPU at host RAM.
+        // enable_peers() and uvm_mmu_create_peer_identity_mappings() keep such
+        // pairs off this path; keep this check in release builds so any path
+        // that misses those gates is reported loudly.
+        UVM_ASSERT_MSG_RELEASE(parent_peer_caps->bar1_p2p_dma_size[peer_index] != 0,
+                               "no static BAR1 P2P DMA window, GPU %s accessing GPU %s\n",
+                               uvm_gpu_name(accessing_gpu),
+                               uvm_gpu_name(owning_gpu));
 
         address += parent_peer_caps->bar1_p2p_dma_base_address[peer_index];
     }
@@ -3364,6 +3393,8 @@ static bool gpu_phys_address_is_bar1p2p_peer(uvm_gpu_t *gpu, uvm_gpu_phys_addres
         if (peer_caps->link_type != UVM_GPU_LINK_PCIE_BAR1)
             continue;
 
+        // METHOD3: for dynamic BAR1 peers base and size are 0, so the range
+        // below is empty and never matches; UVM does not copy to them.
         if (address.address >= peer_caps->bar1_p2p_dma_base_address[peer_index] &&
             address.address < (peer_caps->bar1_p2p_dma_base_address[peer_index] +
                                peer_caps->bar1_p2p_dma_size[peer_index])) {

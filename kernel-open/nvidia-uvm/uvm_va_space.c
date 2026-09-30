@@ -1246,19 +1246,28 @@ static NV_STATUS enable_peers(uvm_va_space_t *va_space, uvm_gpu_t *gpu0, uvm_gpu
 
     UVM_ASSERT(!test_bit(pair_index, va_space->enabled_peers));
 
-    processor_mask_array_set(va_space->can_access, gpu0->id, gpu1->id);
-    processor_mask_array_set(va_space->can_access, gpu1->id, gpu0->id);
-    processor_mask_array_set(va_space->accessible_from, gpu0->id, gpu1->id);
-    processor_mask_array_set(va_space->accessible_from, gpu1->id, gpu0->id);
+    // METHOD3: dynamic BAR1 peers have no static BAR1 DMA window, so managed
+    // memory cannot be remote-mapped or peer-copied between them (the address
+    // would be SYS + FB offset + base 0, i.e. host RAM). Leave can_access,
+    // accessible_from and can_copy_from clear so managed pages stage through
+    // sysmem, as for PCIe peers without peer access. The enabled_peers bit is
+    // still set below: external mappings (CUDA IPC, cuMem, legacy peer access)
+    // only need that bit and use RM's dynamic BAR1 windows.
+    if (!uvm_parent_gpus_are_dynamic_bar1_peers(gpu0->parent, gpu1->parent)) {
+        processor_mask_array_set(va_space->can_access, gpu0->id, gpu1->id);
+        processor_mask_array_set(va_space->can_access, gpu1->id, gpu0->id);
+        processor_mask_array_set(va_space->accessible_from, gpu0->id, gpu1->id);
+        processor_mask_array_set(va_space->accessible_from, gpu1->id, gpu0->id);
 
-    if (gpu0->parent->peer_copy_mode != UVM_GPU_PEER_COPY_MODE_UNSUPPORTED) {
-        UVM_ASSERT_MSG(gpu1->parent->peer_copy_mode == gpu0->parent->peer_copy_mode,
-                       "GPU %s GPU %s\n",
-                       uvm_gpu_name(gpu0),
-                       uvm_gpu_name(gpu1));
+        if (gpu0->parent->peer_copy_mode != UVM_GPU_PEER_COPY_MODE_UNSUPPORTED) {
+            UVM_ASSERT_MSG(gpu1->parent->peer_copy_mode == gpu0->parent->peer_copy_mode,
+                           "GPU %s GPU %s\n",
+                           uvm_gpu_name(gpu0),
+                           uvm_gpu_name(gpu1));
 
-        processor_mask_array_set(va_space->can_copy_from, gpu1->id, gpu0->id);
-        processor_mask_array_set(va_space->can_copy_from, gpu0->id, gpu1->id);
+            processor_mask_array_set(va_space->can_copy_from, gpu1->id, gpu0->id);
+            processor_mask_array_set(va_space->can_copy_from, gpu0->id, gpu1->id);
+        }
     }
 
     // Pre-compute nvlink and native atomic masks for the new peers

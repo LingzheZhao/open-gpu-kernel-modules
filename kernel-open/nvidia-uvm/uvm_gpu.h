@@ -1672,6 +1672,12 @@ bool uvm_parent_gpus_are_nvswitch_connected(const uvm_parent_gpu_t *parent_gpu0,
 
 bool uvm_parent_gpus_are_bar1_peers(const uvm_parent_gpu_t *parent_gpu0, const uvm_parent_gpu_t *parent_gpu1);
 
+// METHOD3: true for PCIE_BAR1 peers without a static BAR1 DMA window in at
+// least one direction (dynamic BAR1 P2P). Such pairs support external
+// mappings only, not managed-memory peer access.
+bool uvm_parent_gpus_are_dynamic_bar1_peers(const uvm_parent_gpu_t *parent_gpu0,
+                                            const uvm_parent_gpu_t *parent_gpu1);
+
 bool uvm_parent_gpus_are_nvlink_direct_connected(const uvm_parent_gpu_t *parent_gpu0, const uvm_parent_gpu_t *parent_gpu1);
 
 static bool uvm_gpus_are_smc_peers(const uvm_gpu_t *gpu0, const uvm_gpu_t *gpu1)
