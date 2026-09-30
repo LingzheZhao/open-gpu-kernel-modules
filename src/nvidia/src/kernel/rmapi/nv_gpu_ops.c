@@ -2441,6 +2441,32 @@ NV_STATUS nvGpuOpsDeviceDestroy(struct gpuDevice *device)
 
         nvGpuOpsRmSmcPartitionDestroy(device);
 
+        //
+        // METHOD3: release peer windows left on this subdevice with thread
+        // state and (best effort) the RMAPI read lock, as nvGpuOpsFreeDupedHandle
+        // does. Drain even if the lock fails so the BAR1/IOMMU windows are not
+        // leaked. The RMAPI lock is dropped before btreeLock, which is held
+        // across pRmApi calls that take the RMAPI lock themselves.
+        //
+        if ((rmSubDevice->pDynBar1Mutex != NULL) && (rmSubDevice->pDynBar1List != NULL))
+        {
+            THREAD_STATE_NODE dynBar1ThreadState;
+            NvBool            bDynBar1ApiLock;
+
+            threadStateInit(&dynBar1ThreadState, THREAD_STATE_FLAGS_NONE);
+            bDynBar1ApiLock = (rmapiLockAcquire(RMAPI_LOCK_FLAGS_READ,
+                                                RM_LOCK_MODULES_GPU_OPS) == NV_OK);
+            NV_PRINTF(LEVEL_WARNING,
+                      "METHOD3: dynamic BAR1 P2P windows left at device destroy "
+                      "(0x%llx bytes, RMAPI lock %s); releasing\n",
+                      rmSubDevice->dynBar1MappedBytes,
+                      bDynBar1ApiLock ? "held" : "not held");
+            _nvGpuOpsDynBar1DestroyAll(rmSubDevice);
+            if (bDynBar1ApiLock)
+                rmapiLockRelease();
+            threadStateFree(&dynBar1ThreadState, THREAD_STATE_FLAGS_NONE);
+        }
+
         portSyncRwLockAcquireWrite(rmDevice->btreeLock);
         rmDevice->subDeviceCount--;
         deleteDescriptor(&rmDevice->subDevices, device->subdeviceInstance, (void**)&rmSubDevice);
@@ -2449,10 +2475,10 @@ NV_STATUS nvGpuOpsDeviceDestroy(struct gpuDevice *device)
         NV_ASSERT(rmSubDevice->hP2pObject == 0);
         NV_ASSERT(rmSubDevice->p2pObjectRef == 0);
 
-        // Release any peer windows left on this subdevice.
+        // METHOD3: peer windows were drained above, before btreeLock.
         if (rmSubDevice->pDynBar1Mutex != NULL)
         {
-            _nvGpuOpsDynBar1DestroyAll(rmSubDevice);
+            NV_ASSERT(rmSubDevice->pDynBar1List == NULL);
             portSyncMutexDestroy(rmSubDevice->pDynBar1Mutex);
         }
 
@@ -3715,6 +3741,59 @@ _nvGpuOpsDynBar1Find(subDeviceDesc *rmSubDevice, NvHandle hDupMemory)
 }
 
 //
+// METHOD3: undo the remote BAR1 mapping made by _nvGpuOpsDynBar1Create. The
+// unmap and the lock release happen only if the remote GPU lock is really held.
+// If pRemoteGpu is no longer registered with gpumgr or cannot be locked, only
+// memArea.pRanges is freed (kbusUnmapFbAperture_GM107 would free it at done:).
+// The BAR1 VA and its reuseDb/reverseMap entries then stay allocated until the
+// GPU's BAR1 state is torn down; _kbusDestroyMemdescBar1Cb only drops the
+// per-memdesc submap. Callers assume the remote OBJGPU outlives the dup of its
+// memory (_nvGpuOpsDynBar1Destroy has already logged it and destroyed the window
+// memdesc it owns), so the validity check below is defensive only.
+//
+static void
+_nvGpuOpsDynBar1UnmapRemote(OBJGPU *pRemoteGpu,
+                            MEMORY_DESCRIPTOR *pAllocMemDesc,
+                            MemoryArea memArea)
+{
+    NV_STATUS lockStatus = NV_OK;
+    NvBool    bTaken = NV_FALSE;
+
+    // METHOD3: defensive only; guards the lock and unmap below, not the
+    // caller's earlier uses of pRemoteGpu.
+    if (!gpumgrIsGpuPointerValid(pRemoteGpu))
+    {
+        lockStatus = NV_ERR_INVALID_DEVICE;
+    }
+    else
+    {
+        bTaken = (rmDeviceGpuLockIsOwner(gpuGetInstance(pRemoteGpu)) || rmGpuLockIsOwner());
+        if (!bTaken)
+        {
+            lockStatus = rmDeviceGpuLocksAcquire(pRemoteGpu, GPUS_LOCK_FLAGS_NONE,
+                                                 RM_LOCK_MODULES_P2P);
+        }
+    }
+
+    if (lockStatus == NV_OK)
+    {
+        kbusUnmapFbAperture_HAL(pRemoteGpu, GPU_GET_KERNEL_BUS(pRemoteGpu), pAllocMemDesc,
+                                memArea, BUS_MAP_FB_FLAGS_MAP_UNICAST);
+        if (!bTaken)
+            rmDeviceGpuLocksRelease(pRemoteGpu, GPUS_LOCK_FLAGS_NONE, NULL);
+    }
+    else
+    {
+        NV_PRINTF(LEVEL_ERROR,
+                  "METHOD3: cannot lock remote GPU to unmap dynamic BAR1 window "
+                  "bar1Off 0x%llx (0x%x); leaking BAR1 VA\n",
+                  (memArea.numRanges != 0) ? memArea.pRanges[0].start : 0ULL,
+                  lockStatus);
+        portMemFree(memArea.pRanges);
+    }
+}
+
+//
 // Map pAllocMemDesc (owned by pRemoteGpu) into pRemoteGpu's BAR1, IOMMU-map
 // the window into pMappingGpu's IOVA, track it, and return the source-visible
 // DMA base. Caller must hold rmSubDevice->pDynBar1Mutex and the RMAPI lock;
@@ -3861,13 +3940,8 @@ fail:
         memdescDestroy(pWin);
     if (bMapped)
     {
-        NvBool bTaken = (rmDeviceGpuLockIsOwner(gpuGetInstance(pRemoteGpu)) || rmGpuLockIsOwner());
-        if (!bTaken)
-            (void)rmDeviceGpuLocksAcquire(pRemoteGpu, GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
-        kbusUnmapFbAperture_HAL(pRemoteGpu, pRemoteKernelBus, pAllocMemDesc, memArea,
-                                BUS_MAP_FB_FLAGS_MAP_UNICAST);
-        if (!bTaken)
-            rmDeviceGpuLocksRelease(pRemoteGpu, GPUS_LOCK_FLAGS_NONE, NULL);
+        // METHOD3: unmap only under the remote GPU lock; keep the original status.
+        _nvGpuOpsDynBar1UnmapRemote(pRemoteGpu, pAllocMemDesc, memArea);
     }
     return status;
 }
@@ -3902,8 +3976,6 @@ _nvGpuOpsDynBar1Destroy(subDeviceDesc *rmSubDevice, NvHandle hDupMemory)
     gpuDynBar1P2PMapping *pMap = NULL;
     gpuDynBar1P2PMapping *pPrev = NULL;
     gpuDynBar1P2PMapping *pCur;
-    KernelBus *pRemoteKernelBus;
-    NvBool bTaken;
 
     portSyncMutexAcquire(rmSubDevice->pDynBar1Mutex);
     for (pCur = rmSubDevice->pDynBar1List; pCur != NULL; pPrev = pCur, pCur = pCur->pNext)
@@ -3933,14 +4005,8 @@ _nvGpuOpsDynBar1Destroy(subDeviceDesc *rmSubDevice, NvHandle hDupMemory)
     memdescUnmapIommu(pMap->pWindowMemDesc, pMap->iovaspaceId);
     memdescDestroy(pMap->pWindowMemDesc);
 
-    pRemoteKernelBus = GPU_GET_KERNEL_BUS(pMap->pRemoteGpu);
-    bTaken = (rmDeviceGpuLockIsOwner(gpuGetInstance(pMap->pRemoteGpu)) || rmGpuLockIsOwner());
-    if (!bTaken)
-        (void)rmDeviceGpuLocksAcquire(pMap->pRemoteGpu, GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
-    kbusUnmapFbAperture_HAL(pMap->pRemoteGpu, pRemoteKernelBus, pMap->pAllocMemDesc,
-                            pMap->memArea, BUS_MAP_FB_FLAGS_MAP_UNICAST);
-    if (!bTaken)
-        rmDeviceGpuLocksRelease(pMap->pRemoteGpu, GPUS_LOCK_FLAGS_NONE, NULL);
+    // METHOD3: unmap only under the remote GPU lock (see _nvGpuOpsDynBar1UnmapRemote).
+    _nvGpuOpsDynBar1UnmapRemote(pMap->pRemoteGpu, pMap->pAllocMemDesc, pMap->memArea);
 
     portMemFree(pMap);
 }
@@ -4455,7 +4521,13 @@ nvGpuOpsBuildExternalAllocPtes
     if (bDynBar1Mapped &&
         ((offset >= memdescGetSize(pMemDesc)) ||
          (mappingSize > memdescGetSize(pMemDesc) - offset)))
+    {
+        // METHOD3: log the rejected request, as the validated 590 code did.
+        NV_PRINTF(LEVEL_ERROR,
+                  "METHOD3: map 0x%llx+0x%llx exceeds dynamic BAR1 window 0x%llx\n",
+                  offset, mappingSize, memdescGetSize(pMemDesc));
         return NV_ERR_INVALID_LIMIT;
+    }
 
     skipPteCount = pLevelFmt->entrySize / sizeof(NvU64);
 
@@ -4890,7 +4962,13 @@ nvGpuOpsBuildExternalAllocPhysAddrs
     if (bDynBar1Mapped &&
         ((offset >= memdescGetSize(pMemDesc)) ||
          (mappingSize > memdescGetSize(pMemDesc) - offset)))
+    {
+        // METHOD3: log the rejected request, as the validated 590 code did.
+        NV_PRINTF(LEVEL_ERROR,
+                  "METHOD3: phys map 0x%llx+0x%llx exceeds dynamic BAR1 window 0x%llx\n",
+                  offset, mappingSize, memdescGetSize(pMemDesc));
         return NV_ERR_INVALID_LIMIT;
+    }
 
     physAddrCount = NV_MIN((pGpuExternalPhysAddrInfo->physAddrBufferSize),
                       (mappingSize / mappingPageSize));
