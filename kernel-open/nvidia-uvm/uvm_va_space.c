@@ -1246,9 +1246,9 @@ static NV_STATUS enable_peers(uvm_va_space_t *va_space, uvm_gpu_t *gpu0, uvm_gpu
 
     UVM_ASSERT(!test_bit(pair_index, va_space->enabled_peers));
 
-    // BAR1P2P: managed memory cannot be remote-mapped or peer-copied between
-    // BAR1 peers without a static BAR1 DMA window (the address would be
-    // SYS + FB offset + base 0, i.e. host RAM).
+    // METHOD3: dynamic BAR1 peers have no static BAR1 DMA window, so managed
+    // memory cannot be remote-mapped or peer-copied between them (the address
+    // would be SYS + FB offset + base 0, i.e. host RAM).
     // BAR1P2P: pre-Hopper BAR1 peers are not used for managed memory unless
     // uvm_bar1_p2p_managed is set (see
     // uvm_parent_gpus_bar1_managed_unsupported()).

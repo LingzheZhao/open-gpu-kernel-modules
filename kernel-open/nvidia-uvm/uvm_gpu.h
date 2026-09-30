@@ -1683,8 +1683,8 @@ bool uvm_parent_gpus_are_bar1_peers(const uvm_parent_gpu_t *parent_gpu0, const u
 
 // BAR1P2P: true for PCIE_BAR1 peers that must not be used for managed-memory
 // peer access (remote mappings, CE peer copies, peer identity mappings):
-// pairs without a static BAR1 DMA window in at least one direction,
-// static BAR1 pairs whose DMA window base is not 2MB
+// dynamic BAR1 P2P pairs without a static BAR1 DMA window in at least one
+// direction (METHOD3), static BAR1 pairs whose DMA window base is not 2MB
 // aligned in at least one direction (any architecture, regardless of
 // uvm_bar1_p2p_managed), and pairs involving a GPU without
 // bar1_p2p_managed_supported unless the uvm_bar1_p2p_managed module parameter

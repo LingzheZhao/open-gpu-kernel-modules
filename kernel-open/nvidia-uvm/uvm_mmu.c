@@ -2410,7 +2410,7 @@ NV_STATUS uvm_mmu_create_peer_identity_mappings(uvm_gpu_t *gpu, uvm_gpu_t *peer)
     if (gpu->parent->peer_copy_mode != UVM_GPU_PEER_COPY_MODE_VIRTUAL || peer->mem_info.size == 0)
         return NV_OK;
 
-    // BAR1P2P: for BAR1 peers without a static BAR1 DMA window a peer
+    // METHOD3: dynamic BAR1 peers have no static BAR1 DMA window, so a peer
     // identity mapping would map SYS base 0 (host RAM).
     // BAR1P2P: pre-Hopper BAR1 peers are not used for managed memory unless
     // uvm_bar1_p2p_managed is set, and neither are static BAR1 peers whose DMA

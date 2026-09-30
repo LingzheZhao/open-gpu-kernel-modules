@@ -71,7 +71,8 @@ module_param(uvm_bar1_p2p_managed, int, S_IRUGO);
 MODULE_PARM_DESC(uvm_bar1_p2p_managed, "Managed memory peer access over PCIe BAR1 P2P on pre-Hopper GPUs: "
                                        "0 [default] = disabled, managed pages migrate through sysmem and "
                                        "external mappings (CUDA IPC, cuMem, peer access) are unaffected; "
-                                       "1 = enabled (experimental). Hopper+ GPUs are not affected.");
+                                       "1 = enabled (experimental). Hopper+ GPUs are not affected. "
+                                       "Dynamic BAR1 P2P peers never support it.");
 
 static uvm_user_channel_t *get_user_channel(uvm_rb_tree_node_t *node)
 {
@@ -2200,11 +2201,12 @@ static bool bar1_p2p_dma_base_misaligned(const uvm_parent_gpu_peer_t *parent_pee
 // BAR1P2P: whether managed memory must not use direct peer access (remote
 // mappings, CE peer copies, peer identity mappings) between PCIE_BAR1 peers.
 //
-// BAR1P2P: a PCIE_BAR1 pair without a whole-FB static BAR1 DMA window in at
-// least one direction (bar1_p2p_dma_size == 0) gives managed memory no window
-// to address the peer FB through, so it never uses direct peer access for it,
-// regardless of uvm_bar1_p2p_managed. RM reports BAR1 P2P only when both GPUs
-// have static BAR1, so this is defensive.
+// METHOD3: a BAR1 peer pair is "dynamic" when RM reports the PCIE_BAR1 link
+// but no whole-FB static BAR1 DMA window for at least one direction
+// (bar1_p2p_dma_size == 0). Such pairs are served by per-allocation dynamic
+// BAR1 windows that RM builds for external mappings only. UVM managed memory
+// has no window to address the peer FB through, so it never uses direct peer
+// access for them, regardless of uvm_bar1_p2p_managed.
 //
 // BAR1P2P: static BAR1 peers involving a GPU without
 // bar1_p2p_managed_supported (Turing, Ampere, Ada) are only used for managed
@@ -3326,9 +3328,9 @@ uvm_gpu_phys_address_t uvm_gpu_peer_phys_address(uvm_gpu_t *owning_gpu, NvU64 ad
         int peer_index = (uvm_id_cmp(accessing_gpu->id, owning_gpu->id) < 0) ? 0 : 1;
 
         UVM_ASSERT(parent_peer_caps->link_type == UVM_GPU_LINK_PCIE_BAR1);
-        // BAR1P2P: without a static DMA window (size 0, base 0) the address
-        // computed below would point the GPU at host RAM, and pre-Hopper BAR1
-        // peers are gated off by default.
+        // METHOD3: dynamic BAR1 peers have no static DMA window (size 0, base
+        // 0), so the address computed below would point the GPU at host RAM.
+        // BAR1P2P: pre-Hopper BAR1 peers are gated off by default as well.
         // enable_peers() and uvm_mmu_create_peer_identity_mappings() keep such
         // pairs off this path; keep this check in release builds so that a
         // remote mapping or a physical-mode peer copy that misses those gates
@@ -3464,6 +3466,8 @@ static bool gpu_phys_address_is_bar1p2p_peer(uvm_gpu_t *gpu, uvm_gpu_phys_addres
         if (peer_caps->link_type != UVM_GPU_LINK_PCIE_BAR1)
             continue;
 
+        // METHOD3: for dynamic BAR1 peers base and size are 0, so the range
+        // below is empty and never matches; UVM does not copy to them.
         if (address.address >= peer_caps->bar1_p2p_dma_base_address[peer_index] &&
             address.address < (peer_caps->bar1_p2p_dma_base_address[peer_index] +
                                peer_caps->bar1_p2p_dma_size[peer_index])) {
