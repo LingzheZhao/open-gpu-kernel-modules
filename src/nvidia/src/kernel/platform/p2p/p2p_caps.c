@@ -26,7 +26,7 @@
 #include "kernel/gpu/mig_mgr/kernel_mig_manager.h"
 #include "kernel/gpu/nvlink/kernel_nvlink.h"
 #include "kernel/gpu/bif/kernel_bif.h"
-#include "kernel/gpu/bus/kern_bus.h" // BAR1P2P: mailbox state for the PROPRIETARY fallback
+#include "kernel/gpu/bus/kern_bus.h" // METHOD3: mailbox state for the PROPRIETARY fallback
 #include "gpu/subdevice/subdevice.h"
 #include "gpu/gpu.h"
 #include "virtualization/hypervisor/hypervisor.h"
@@ -962,17 +962,17 @@ p2pGetCapsStatus
             (*pP2PReadCapStatus == NV0000_P2P_CAPS_STATUS_OK))
         {
             //
-            // BAR1P2P: mailbox P2P needs a mailbox area on every GPU. With
+            // METHOD3: mailbox P2P needs a mailbox area on every GPU. With
             // pcieP2PType forced to BAR1, RM never reserves one, so any mask
             // that fails BAR1 would advertise P2P and then fail in
-            // kbusSetP2PMailboxBar1Area_GM200. That covers a pair in which a
-            // GPU has no static BAR1, and it covers every single-GPU
-            // (loopback) mask, because kbusIsPcieBar1P2PMappingSupported_GH100
-            // never supports loopback. Mirror that check here and report no
-            // P2P so CUDA/NCCL fall back cleanly. Loopback PCI/PROP/LOOPBACK
-            // caps are therefore not advertised when no mailbox area is
-            // reserved; this matches allocation, where a loopback NV50_P2P
-            // object already failed in kbusSetP2PMailboxBar1Area_GM200.
+            // kbusSetP2PMailboxBar1Area_GM200. That covers a pair with mixed
+            // static/dynamic BAR1, and it covers every single-GPU (loopback)
+            // mask, because kbusIsPcieBar1P2PMappingSupported_GH100 never
+            // supports loopback. Mirror that check here and report no P2P so
+            // CUDA/NCCL fall back cleanly. Loopback PCI/PROP/LOOPBACK caps are
+            // therefore not advertised on all-dynamic nodes, unlike the 590
+            // tree; this matches allocation, where a loopback NV50_P2P object
+            // already failed in kbusSetP2PMailboxBar1Area_GM200.
             //
             {
                 OBJGPU *pMbGpu      = NULL;
@@ -988,7 +988,7 @@ p2pGetCapsStatus
                           PCIE_P2P_INVALID_WRITE_MAILBOX_ADDR)))
                     {
                         NV_PRINTF(LEVEL_INFO,
-                                  "BAR1P2P: GPU%u has no P2P mailbox area and BAR1 P2P "
+                                  "METHOD3: GPU%u has no P2P mailbox area and BAR1 P2P "
                                   "is unavailable for mask 0x%x (pair or loopback); "
                                   "P2P not supported\n",
                                   gpuGetInstance(pMbGpu), gpuMask);
