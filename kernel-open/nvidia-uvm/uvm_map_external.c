@@ -1287,6 +1287,16 @@ void uvm_ext_gpu_map_destroy(uvm_va_range_external_t *external_range,
             aperture = UVM_APERTURE_PEER(0);
         else if (ext_gpu_map->is_sysmem)
             aperture = UVM_APERTURE_SYS;
+        // BAR1P2P: RM maps the vidmem of a PCIE_BAR1 peer with a SYS aperture
+        // and evicts the sysmem L2 lines when building the mapping, so the
+        // cached lines are sysmem lines: invalidate those. owning_gpu is NULL
+        // for fabric memory. Limited to the pre-Hopper GPUs the P2P patch
+        // enables BAR1 P2P on (bar1_p2p_managed_supported is false there);
+        // stock Hopper+/Blackwell unmaps are left unchanged.
+        else if (ext_gpu_map->owning_gpu &&
+                 !mapped_gpu->parent->bar1_p2p_managed_supported &&
+                 uvm_parent_gpus_are_bar1_peers(mapped_gpu->parent, ext_gpu_map->owning_gpu->parent))
+            aperture = UVM_APERTURE_SYS;
         else
             aperture = UVM_APERTURE_PEER(0);
 
