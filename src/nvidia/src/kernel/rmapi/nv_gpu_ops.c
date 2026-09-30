@@ -4030,6 +4030,8 @@ nvGpuOpsBuildExternalAllocPtes
     KernelGmmu    *pKernelGmmu = GPU_GET_KERNEL_GMMU(pMappingGpu);
     NvU64          allocSize;
     NvBool         isCompressedKind;
+    NvBool         bOwnerCompressed;
+    NvU32          ownerKind;
     NvU64         *physicalAddresses = NULL;
     NvU32          newKind, oldKind;
     NvBool         kindChanged = NV_FALSE;
@@ -4142,6 +4144,59 @@ nvGpuOpsBuildExternalAllocPtes
     skipPteCount = pLevelFmt->entrySize / sizeof(NvU64);
 
     isCompressedKind = memmgrIsKind_HAL(pMemoryManager, FB_IS_KIND_COMPRESSIBLE, kind);
+
+    //
+    // BAR1P2P: a BAR1 peer is mapped with a SYS aperture, whose VER2 address
+    // field (ADDRESS_SYS 53:8) overlaps COMPTAGLINE (55:36). The comptag
+    // setup below would clear address bits 40 and up and store a comptagline
+    // there, redirecting the mapping (compTagLineMin = 1 -> +1TB). Comptags in
+    // the mapping GPU's PTE are also meaningless for a remote target: the
+    // peer's BAR1 PTE decides how the access is (de)compressed. So map the
+    // peer with the uncompressed kind, but only when the peer's static BAR1
+    // PTEs carry the compressed kind: kbusIncreaseStaticBar1Refcount()
+    // switches them to the allocation's kind only for >= 2MB pages; otherwise
+    // they keep the uncompressed default kind and a peer would access raw
+    // compressed data, so reject the mapping.
+    // The static BAR1 check uses the owner's kind (memdescGetPteKind(), as
+    // kbusIncreaseStaticBar1Refcount() records it), not the mapping kind:
+    // the caller's compression/format request may have rewritten the mapping
+    // kind (e.g. to a DISABLE_PLC or an uncompressed kind), and the peer
+    // accesses the memory through the owner's static BAR1 PTEs anyway.
+    // Stock RM only reports BAR1 P2P on GMMU VER3 GPUs, left unchanged.
+    //
+    ownerKind = memdescGetPteKind(pMemDesc);
+    bOwnerCompressed = memmgrIsKind_HAL(pMemoryManager, FB_IS_KIND_COMPRESSIBLE, ownerKind);
+
+    if ((pFmt->version <= GMMU_FMT_VERSION_2) && isBar1P2PSupported &&
+        (isCompressedKind || bOwnerCompressed))
+    {
+        if (bOwnerCompressed)
+        {
+            MEMORY_DESCRIPTOR *pRootMemDesc = memdescGetRootMemDesc(pMemDesc, NULL);
+
+            if ((pRootMemDesc->staticBar1MappingRefCount == 0) ||
+                (pRootMemDesc->staticBar1MappingKind != ownerKind))
+            {
+                NV_PRINTF(LEVEL_ERROR,
+                          "BAR1P2P: compressible kind 0x%x (requested 0x%x) not mapped by the static BAR1 of "
+                          "GPU%u (kind 0x%x, refcount %u); peer mapping not supported\n",
+                          ownerKind, kind, gpuGetInstance(pMemDesc->pGpu),
+                          pRootMemDesc->staticBar1MappingKind,
+                          pRootMemDesc->staticBar1MappingRefCount);
+                return NV_ERR_NOT_SUPPORTED;
+            }
+        }
+
+        if (isCompressedKind)
+        {
+            NV_PRINTF(LEVEL_INFO,
+                      "BAR1P2P: mapping compressible kind 0x%x of GPU%u uncompressed on GPU%u\n",
+                      kind, gpuGetInstance(pMemDesc->pGpu), gpuGetInstance(pMappingGpu));
+
+            kind = memmgrGetUncompressedKind_HAL(pMappingGpu, pMemoryManager, kind, NV_FALSE);
+            isCompressedKind = NV_FALSE;
+        }
+    }
 
     //
     // Specifying mapping page size for compressed
